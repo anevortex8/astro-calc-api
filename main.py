@@ -1,24 +1,39 @@
 """
 FastAPI - Calculate Chart endpoint para sistema ANCORADA
 =========================================================
-Endpoint POST /calculate-chart retorna chart_json mock consistente
-e astrologicamente coerente para alimentar diagnósticos profundos.
+Endpoint POST /calculate-chart retorna carta astral REAL
+calculada via Swiss Ephemeris (pyswisseph).
 
 Para rodar:
     uvicorn main:app --reload --port 8000
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI
+import swisseph as swe
+import pytz
+from geopy.geocoders import Nominatim
+from timezonefinder import TimezoneFinder
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+# ---------------------------------------------------------------------------
+# Swiss Ephemeris setup
+# ---------------------------------------------------------------------------
+import os as _os
+_EPHE_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "ephe")
+if _os.path.isdir(_EPHE_PATH):
+    swe.set_ephe_path(_EPHE_PATH)
+else:
+    swe.set_ephe_path(".")
+
 app = FastAPI(
     title="ANCORADA Chart API",
-    description="API de cálculo astrológico para sistema de diagnóstico ANCORADA",
-    version="0.2.0",
+    description="API de calculo astrologico real para sistema ANCORADA",
+    version="1.0.0",
 )
 
 app.add_middleware(
@@ -43,35 +58,75 @@ class BirthData(BaseModel):
 
 
 # =============================================================================
-# Helpers astrológicos
+# Constantes astrologicas
 # =============================================================================
 SIGNS = [
-    "Áries", "Touro", "Gêmeos", "Câncer", "Leão", "Virgem",
-    "Libra", "Escorpião", "Sagitário", "Capricórnio", "Aquário", "Peixes",
+    "Aries", "Touro", "Gemeos", "Cancer", "Leao", "Virgem",
+    "Libra", "Escorpiao", "Sagitario", "Capricornio", "Aquario", "Peixes",
 ]
 
 SIGN_ELEMENTS = {
-    "Áries": "fogo", "Leão": "fogo", "Sagitário": "fogo",
-    "Touro": "terra", "Virgem": "terra", "Capricórnio": "terra",
-    "Gêmeos": "ar", "Libra": "ar", "Aquário": "ar",
-    "Câncer": "água", "Escorpião": "água", "Peixes": "água",
+    "Aries": "fogo", "Leao": "fogo", "Sagitario": "fogo",
+    "Touro": "terra", "Virgem": "terra", "Capricornio": "terra",
+    "Gemeos": "ar", "Libra": "ar", "Aquario": "ar",
+    "Cancer": "agua", "Escorpiao": "agua", "Peixes": "agua",
 }
 
 SIGN_MODALITIES = {
-    "Áries": "cardinal", "Câncer": "cardinal", "Libra": "cardinal", "Capricórnio": "cardinal",
-    "Touro": "fixo", "Leão": "fixo", "Escorpião": "fixo", "Aquário": "fixo",
-    "Gêmeos": "mutável", "Virgem": "mutável", "Sagitário": "mutável", "Peixes": "mutável",
+    "Aries": "cardinal", "Cancer": "cardinal", "Libra": "cardinal", "Capricornio": "cardinal",
+    "Touro": "fixo", "Leao": "fixo", "Escorpiao": "fixo", "Aquario": "fixo",
+    "Gemeos": "mutavel", "Virgem": "mutavel", "Sagitario": "mutavel", "Peixes": "mutavel",
 }
 
 PLANET_RULERS = {
-    "Áries": "Marte", "Touro": "Vênus", "Gêmeos": "Mercúrio", "Câncer": "Lua",
-    "Leão": "Sol", "Virgem": "Mercúrio", "Libra": "Vênus", "Escorpião": "Plutão",
-    "Sagitário": "Júpiter", "Capricórnio": "Saturno", "Aquário": "Urano", "Peixes": "Netuno",
+    "Aries": "Marte", "Touro": "Venus", "Gemeos": "Mercurio", "Cancer": "Lua",
+    "Leao": "Sol", "Virgem": "Mercurio", "Libra": "Venus", "Escorpiao": "Plutao",
+    "Sagitario": "Jupiter", "Capricornio": "Saturno", "Aquario": "Urano", "Peixes": "Netuno",
 }
 
+# Mapeamento nome -> id do Swiss Ephemeris
+PLANET_IDS = {
+    "sun": swe.SUN,
+    "moon": swe.MOON,
+    "mercury": swe.MERCURY,
+    "venus": swe.VENUS,
+    "mars": swe.MARS,
+    "jupiter": swe.JUPITER,
+    "saturn": swe.SATURN,
+    "uranus": swe.URANUS,
+    "neptune": swe.NEPTUNE,
+    "pluto": swe.PLUTO,
+    "chiron": swe.CHIRON,
+}
 
+PLANET_NAMES_PT = {
+    "sun": "Sol", "moon": "Lua", "mercury": "Mercurio", "venus": "Venus",
+    "mars": "Marte", "jupiter": "Jupiter", "saturn": "Saturno",
+    "uranus": "Urano", "neptune": "Netuno", "pluto": "Plutao", "chiron": "Quiron",
+    "ascendant": "Ascendente", "midheaven": "Meio do Ceu",
+}
+
+HOUSE_THEMES = [
+    "Identidade e expressao pessoal",
+    "Recursos, valores e seguranca material",
+    "Comunicacao, irmaos e ambiente proximo",
+    "Lar, raizes e mundo emocional",
+    "Criatividade, prazer e filhos",
+    "Trabalho, rotina e saude",
+    "Relacionamentos e parcerias",
+    "Transformacao, sexualidade e recursos compartilhados",
+    "Filosofia, viagens e expansao",
+    "Carreira, vocacao e imagem publica",
+    "Amizades, grupos e visao de futuro",
+    "Inconsciente, espiritualidade e dissolucao",
+]
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
 def longitude_to_sign(longitude: float) -> dict:
-    """Converte longitude eclíptica (0-360°) em signo + grau dentro do signo."""
+    """Converte longitude ecliptica (0-360) em signo + grau."""
     longitude = longitude % 360
     sign_index = int(longitude // 30)
     degree_in_sign = longitude % 30
@@ -81,7 +136,7 @@ def longitude_to_sign(longitude: float) -> dict:
     return {
         "sign": sign,
         "degree": round(degree_in_sign, 4),
-        "degree_formatted": f"{deg}°{minutes:02d}'",
+        "degree_formatted": f"{deg}\u00b0{minutes:02d}'",
         "absolute_longitude": round(longitude, 4),
         "element": SIGN_ELEMENTS[sign],
         "modality": SIGN_MODALITIES[sign],
@@ -90,21 +145,19 @@ def longitude_to_sign(longitude: float) -> dict:
 
 
 def calc_aspect(lon1: float, lon2: float) -> Optional[dict]:
-    """Calcula aspecto entre duas longitudes eclípticas."""
+    """Calcula aspecto entre duas longitudes eclipticas."""
     diff = abs(lon1 - lon2) % 360
     if diff > 180:
         diff = 360 - diff
 
-    aspects = [
-        ("conjunção", 0, 8),
-        ("oposição", 180, 8),
-        ("trígono", 120, 7),
+    aspects_def = [
+        ("conjuncao", 0, 8),
+        ("oposicao", 180, 8),
+        ("trigono", 120, 7),
         ("quadratura", 90, 7),
         ("sextil", 60, 5),
-        ("quincúncio", 150, 3),
-        ("semi-sextil", 30, 2),
     ]
-    for name, angle, max_orb in aspects:
+    for name, angle, max_orb in aspects_def:
         orb = abs(diff - angle)
         if orb <= max_orb:
             return {
@@ -117,134 +170,195 @@ def calc_aspect(lon1: float, lon2: float) -> Optional[dict]:
     return None
 
 
+def determine_house(longitude: float, cusps: list[float]) -> int:
+    """Determina em qual casa (1-12) uma longitude cai, dadas as 12 cuspides."""
+    lon = longitude % 360
+    for i in range(12):
+        cusp_start = cusps[i] % 360
+        cusp_end = cusps[(i + 1) % 12] % 360
+        if cusp_start < cusp_end:
+            if cusp_start <= lon < cusp_end:
+                return i + 1
+        else:  # cruza 0 graus
+            if lon >= cusp_start or lon < cusp_end:
+                return i + 1
+    return 1
+
+
+def geocode_city(city: str, state: Optional[str], country: str) -> dict:
+    """Geocodifica cidade usando Nominatim (OpenStreetMap)."""
+    geolocator = Nominatim(user_agent="ancorada-chart-api/1.0")
+    parts = [city]
+    if state:
+        parts.append(state)
+    parts.append(country)
+    query = ", ".join(parts)
+
+    location = geolocator.geocode(query, language="pt")
+    if not location:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Nao foi possivel geocodificar a cidade: {query}",
+        )
+    return {
+        "latitude": location.latitude,
+        "longitude": location.longitude,
+        "display_name": location.address,
+    }
+
+
+def get_timezone_info(lat: float, lon: float, dt_utc: datetime) -> dict:
+    """Encontra timezone a partir de coordenadas."""
+    tf = TimezoneFinder()
+    tz_name = tf.timezone_at(lat=lat, lng=lon)
+    if not tz_name:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Nao foi possivel determinar o timezone para lat={lat}, lon={lon}",
+        )
+    tz = pytz.timezone(tz_name)
+    utc_offset = tz.localize(dt_utc.replace(tzinfo=None)).strftime("%z")
+    utc_offset_formatted = f"{utc_offset[:3]}:{utc_offset[3:]}"
+    return {"timezone": tz_name, "utc_offset": utc_offset_formatted}
+
+
+def local_to_julian_day(date_str: str, time_str: Optional[str], tz_name: str) -> float:
+    """Converte data/hora local para Julian Day UT."""
+    parts = date_str.split("-")
+    year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+
+    if time_str:
+        tparts = time_str.split(":")
+        hour, minute = int(tparts[0]), int(tparts[1])
+    else:
+        hour, minute = 12, 0  # meio-dia solar se hora desconhecida
+
+    tz = pytz.timezone(tz_name)
+    local_dt = tz.localize(datetime(year, month, day, hour, minute, 0))
+    utc_dt = local_dt.astimezone(pytz.utc)
+
+    # Julian Day a partir de UTC
+    decimal_hour = utc_dt.hour + utc_dt.minute / 60.0 + utc_dt.second / 3600.0
+    jd = swe.julday(utc_dt.year, utc_dt.month, utc_dt.day, decimal_hour)
+    return jd
+
+
+def calculate_planets(jd: float) -> dict:
+    """Calcula posicoes de todos os planetas para um Julian Day."""
+    results = {}
+    for name, pid in PLANET_IDS.items():
+        # Chiron requer arquivo Swiss Eph; planetas principais usam Moshier
+        if pid == swe.CHIRON:
+            flags = swe.FLG_SWIEPH | swe.FLG_SPEED
+        else:
+            flags = swe.FLG_MOSEPH | swe.FLG_SPEED
+        result, retflag = swe.calc_ut(jd, pid, flags)
+        lon, lat, dist, speed_lon, speed_lat, speed_dist = result
+        results[name] = {
+            "longitude": lon,
+            "latitude": lat,
+            "distance": dist,
+            "speed": speed_lon,
+            "retrograde": speed_lon < 0,
+        }
+    return results
+
+
+def calculate_houses_and_angles(jd: float, lat: float, lon: float) -> dict:
+    """Calcula casas (Placidus) e angulos (ASC, MC)."""
+    cusps, ascmc = swe.houses(jd, lat, lon, b'P')
+    # cusps: tuple de 12 cuspides (indice 0 = casa 1)
+    # ascmc: [0]=ASC, [1]=MC, [2]=ARMC, [3]=Vertex, ...
+    return {
+        "cusps": list(cusps),  # 12 elementos, casa 1 a 12
+        "ascendant": ascmc[0],
+        "midheaven": ascmc[1],
+    }
+
+
 # =============================================================================
-# Mock astrológico consistente
+# Montagem do retorno
 # =============================================================================
-# Carta arquetípica desenhada para acionar TODOS os pilares ANCORADA:
-# - Sol em Câncer (4) - core emocional/familiar
-# - Lua em Capricórnio (10) - tensão emocional/profissional, oposição ao Sol
-# - Ascendente em Libra - busca de harmonia, evita conflito
-# - Saturno em Áries quadratura Sol/Lua - SATURNO DESORIENTADO clássico
-# - Vênus em Gêmeos casa 9 - VÊNUS NEGOCIADA (dispersa, intelectualizada)
-# - Marte em Peixes casa 6 - MARTE APAGADO (em queda, dissolvido em rotina)
-# - Quíron em Áries conjunto Saturno - QUÍRON NÃO INTEGRADO (ferida de identidade)
-# - Plutão em Escorpião casa 2 - âncora central de transformação/poder
-# Longitudes em graus eclípticos absolutos (0° = 0° Áries).
-
-NATAL_LONGITUDES = {
-    "sun":        102.45,   # 12°27' Câncer
-    "moon":       284.18,   # 14°11' Capricórnio (oposto ao Sol)
-    "ascendant":  187.33,   # 7°20' Libra
-    "mercury":     95.72,   # 5°43' Câncer
-    "venus":       72.10,   # 12°06' Gêmeos
-    "mars":       348.55,   # 18°33' Peixes
-    "jupiter":    215.40,   # 5°24' Escorpião
-    "saturn":      18.92,   # 18°55' Áries (quadratura ao Sol/Lua)
-    "uranus":     268.15,   # 28°09' Sagitário
-    "neptune":    295.62,   # 25°37' Capricórnio
-    "pluto":      221.83,   # 11°50' Escorpião (na casa 2)
-    "chiron":      12.40,   # 12°24' Áries (conjunto Saturno)
-    "lilith":     156.27,   # 6°16' Virgem
-    "fortune":    169.55,   # 19°33' Virgem
-    "midheaven":   97.10,   # 7°06' Câncer
-}
-
-
-def build_planet(longitude: float, retrograde: bool = False, speed: float = 1.0,
-                 house: int = 1, declination: float = 0.0) -> dict:
-    """Monta dicionário completo de um planeta a partir de sua longitude."""
-    sign_data = longitude_to_sign(longitude)
+def build_planet_entry(planet_data: dict, house: int) -> dict:
+    """Monta entrada completa de um planeta."""
+    sign_data = longitude_to_sign(planet_data["longitude"])
     return {
         **sign_data,
         "house": house,
-        "retrograde": retrograde,
-        "speed": speed,
-        "declination": declination,
+        "retrograde": planet_data["retrograde"],
+        "speed": round(planet_data["speed"], 6),
+        "declination": round(planet_data.get("latitude", 0), 4),
     }
 
 
-def build_natal_chart() -> dict:
-    """Monta natal_chart com todos os planetas + pontos sensíveis."""
-    # Casas (atribuídas para refletir a história ANCORADA)
-    houses_map = {
-        "sun": 10,        # Sol na casa 10 - vocação visível
-        "moon": 4,        # Lua na casa 4 - raiz emocional (mas oposição inverte)
-        "ascendant": 1,
-        "mercury": 9,     # Mercúrio em Câncer casa 9 - fala que oscila entre familiar e expansivo
-        "venus": 9,       # Vênus em Gêmeos casa 9 - DISPERSÃO afetiva
-        "mars": 6,        # Marte em Peixes casa 6 - rotina dissolve a ação
-        "jupiter": 2,     # Júpiter em Escorpião casa 2 - recursos profundos
-        "saturn": 7,      # Saturno em Áries casa 7 - estrutura via outros
-        "uranus": 3,      # Urano em Sagitário casa 3
-        "neptune": 4,     # Netuno em Capricórnio casa 4 - dissolução nas raízes
-        "pluto": 2,       # Plutão em Escorpião casa 2 - poder via recursos
-        "chiron": 7,      # Quíron em Áries casa 7 - ferida de identidade nos vínculos
-        "lilith": 12,     # Lilith em Virgem casa 12 - sombra do trabalho oculto
-        "fortune": 12,
-        "midheaven": 10,
-    }
-    retrogrades = {"saturn", "neptune", "pluto", "chiron"}
-    speeds = {
-        "sun": 0.9856, "moon": 13.176, "mercury": 1.382, "venus": 1.103, "mars": 0.524,
-        "jupiter": 0.083, "saturn": -0.034, "uranus": 0.039, "neptune": -0.005,
-        "pluto": -0.003, "chiron": -0.011, "lilith": 0.111, "fortune": 0.0, "ascendant": 0.0,
-        "midheaven": 0.0,
-    }
-
+def build_natal_chart(planets: dict, houses_data: dict) -> dict:
+    """Monta natal_chart com todos os planetas + ASC + MC."""
+    cusps = houses_data["cusps"]
     chart = {}
-    for planet, lon in NATAL_LONGITUDES.items():
-        chart[planet] = build_planet(
-            longitude=lon,
-            retrograde=planet in retrogrades,
-            speed=speeds.get(planet, 1.0),
-            house=houses_map.get(planet, 1),
-            declination=round(((lon % 360) - 180) * 0.13, 2),
-        )
+
+    for name, pdata in planets.items():
+        house = determine_house(pdata["longitude"], cusps)
+        chart[name] = build_planet_entry(pdata, house)
+
+    # Ascendente
+    asc_lon = houses_data["ascendant"]
+    asc_sign = longitude_to_sign(asc_lon)
+    chart["ascendant"] = {
+        **asc_sign,
+        "house": 1,
+        "retrograde": False,
+        "speed": 0.0,
+        "declination": 0.0,
+    }
+
+    # Meio do Ceu
+    mc_lon = houses_data["midheaven"]
+    mc_sign = longitude_to_sign(mc_lon)
+    chart["midheaven"] = {
+        **mc_sign,
+        "house": 10,
+        "retrograde": False,
+        "speed": 0.0,
+        "declination": 0.0,
+    }
+
     return chart
 
 
-def build_houses(asc_longitude: float) -> list:
-    """Monta as 12 casas usando sistema Placidus simplificado (cúspides equidistantes a partir do AC)."""
-    house_themes = [
-        "Identidade e expressão pessoal",
-        "Recursos, valores e segurança material",
-        "Comunicação, irmãos e ambiente próximo",
-        "Lar, raízes e mundo emocional",
-        "Criatividade, prazer e filhos",
-        "Trabalho, rotina e saúde",
-        "Relacionamentos e parcerias",
-        "Transformação, sexualidade e recursos compartilhados",
-        "Filosofia, viagens e expansão",
-        "Carreira, vocação e imagem pública",
-        "Amizades, grupos e visão de futuro",
-        "Inconsciente, espiritualidade e dissolução",
-    ]
+def build_houses(houses_data: dict) -> list:
+    """Monta lista das 12 casas com cuspides reais (Placidus)."""
+    cusps = houses_data["cusps"]
     houses = []
     for i in range(12):
-        cusp_lon = (asc_longitude + i * 30) % 360
-        sign_data = longitude_to_sign(cusp_lon)
+        sign_data = longitude_to_sign(cusps[i])
         houses.append({
             "number": i + 1,
-            "cusp_longitude": round(cusp_lon, 4),
+            "cusp_longitude": round(cusps[i], 4),
             "cusp_sign": sign_data["sign"],
             "cusp_degree": sign_data["degree"],
             "cusp_formatted": f"{sign_data['degree_formatted']} {sign_data['sign']}",
             "ruler": sign_data["ruler"],
-            "theme": house_themes[i],
+            "theme": HOUSE_THEMES[i],
         })
     return houses
 
 
-def build_natal_aspects() -> list:
+def build_natal_aspects(planets: dict, houses_data: dict) -> list:
     """Calcula aspectos entre todos os planetas natais."""
     aspect_planets = [
         "sun", "moon", "mercury", "venus", "mars",
         "jupiter", "saturn", "uranus", "neptune", "pluto", "chiron",
     ]
+    # Inclui ASC e MC nos aspectos
+    longitudes = {name: planets[name]["longitude"] for name in aspect_planets}
+    longitudes["ascendant"] = houses_data["ascendant"]
+    longitudes["midheaven"] = houses_data["midheaven"]
+
+    all_points = list(longitudes.keys())
     aspects = []
-    for i, p1 in enumerate(aspect_planets):
-        for p2 in aspect_planets[i + 1:]:
-            aspect = calc_aspect(NATAL_LONGITUDES[p1], NATAL_LONGITUDES[p2])
+    for i, p1 in enumerate(all_points):
+        for p2 in all_points[i + 1:]:
+            aspect = calc_aspect(longitudes[p1], longitudes[p2])
             if aspect:
                 aspects.append({
                     "planet1": p1,
@@ -254,25 +368,34 @@ def build_natal_aspects() -> list:
     return aspects
 
 
-def build_current_transits() -> list:
-    """Trânsitos atuais (mock baseado em posições aproximadas para abril/2026)."""
-    # Posições eclípticas aproximadas de planetas lentos em meados de 2026
-    transit_longitudes = {
-        "saturn":  357.20,   # 27°12' Peixes - aproximando-se do Marte natal
-        "jupiter": 105.40,   # 15°24' Câncer - conjunção ao Sol natal
-        "uranus":   65.85,   # 5°51' Gêmeos - quadratura à Lua natal
-        "neptune":   2.30,   # 2°18' Áries - conjunção ao Quíron/Saturno natal
-        "pluto":   303.45,   # 3°27' Aquário - quadratura ao Júpiter natal
+def build_current_transits(natal_planets: dict, natal_houses_data: dict) -> list:
+    """Calcula transitos atuais reais sobre planetas natais."""
+    now_utc = datetime.now(timezone.utc)
+    decimal_hour = now_utc.hour + now_utc.minute / 60.0 + now_utc.second / 3600.0
+    jd_now = swe.julday(now_utc.year, now_utc.month, now_utc.day, decimal_hour)
+
+    transit_planets_ids = {
+        "jupiter": swe.JUPITER,
+        "saturn": swe.SATURN,
+        "uranus": swe.URANUS,
+        "neptune": swe.NEPTUNE,
+        "pluto": swe.PLUTO,
     }
-    transits = []
     natal_targets = ["sun", "moon", "venus", "mars", "saturn", "chiron"]
-    for tplanet, tlon in transit_longitudes.items():
+
+    transits = []
+    for tname, tid in transit_planets_ids.items():
+        flags = swe.FLG_MOSEPH | swe.FLG_SPEED
+        result, _ = swe.calc_ut(jd_now, tid, flags)
+        tlon = result[0]
         sign_data = longitude_to_sign(tlon)
+
         for target in natal_targets:
-            aspect = calc_aspect(tlon, NATAL_LONGITUDES[target])
+            natal_lon = natal_planets[target]["longitude"]
+            aspect = calc_aspect(tlon, natal_lon)
             if aspect and aspect["orb"] <= 3.0:
                 transits.append({
-                    "transit_planet": tplanet,
+                    "transit_planet": tname,
                     "transit_position": {
                         "sign": sign_data["sign"],
                         "degree_formatted": sign_data["degree_formatted"],
@@ -283,154 +406,185 @@ def build_current_transits() -> list:
                     "orb": aspect["orb"],
                     "applying": aspect["applying"],
                     "strength": aspect["strength"],
-                    "active_until": "2026-08-15",
                 })
     return transits
 
 
 def build_ancorada_extraction(natal_chart: dict, aspects: list) -> dict:
-    """
-    Extrai os 4 pilares ANCORADA + âncora central a partir da carta.
-    Esta é a camada que alimenta o diagnóstico profundo.
-    """
-    saturn = natal_chart["saturn"]
-    venus = natal_chart["venus"]
-    mars = natal_chart["mars"]
-    chiron = natal_chart["chiron"]
-    pluto = natal_chart["pluto"]
+    """Extrai os 4 pilares ANCORADA + ancora central a partir da carta real."""
+    saturn = natal_chart.get("saturn", {})
+    venus = natal_chart.get("venus", {})
+    mars = natal_chart.get("mars", {})
+    chiron = natal_chart.get("chiron", {})
+    pluto = natal_chart.get("pluto", {})
 
-    # Detectar aspectos tensos envolvendo Saturno
     saturn_hard_aspects = [
         a for a in aspects
         if (a["planet1"] == "saturn" or a["planet2"] == "saturn")
-        and a["aspect"] in ("quadratura", "oposição", "conjunção")
+        and a["aspect"] in ("quadratura", "oposicao", "conjuncao")
     ]
+
+    venus_hard_aspects = [
+        a for a in aspects
+        if (a["planet1"] == "venus" or a["planet2"] == "venus")
+        and a["aspect"] in ("quadratura", "oposicao", "conjuncao")
+    ]
+
+    mars_hard_aspects = [
+        a for a in aspects
+        if (a["planet1"] == "mars" or a["planet2"] == "mars")
+        and a["aspect"] in ("quadratura", "oposicao", "conjuncao")
+    ]
+
+    chiron_hard_aspects = [
+        a for a in aspects
+        if (a["planet1"] == "chiron" or a["planet2"] == "chiron")
+        and a["aspect"] in ("quadratura", "oposicao", "conjuncao")
+    ]
+
+    pluto_aspects = [
+        a for a in aspects
+        if a["planet1"] == "pluto" or a["planet2"] == "pluto"
+    ]
+
+    def intensity(hard_aspects_count: int, is_retrograde: bool) -> str:
+        score = hard_aspects_count
+        if is_retrograde:
+            score += 1
+        if score >= 3:
+            return "alta"
+        if score >= 1:
+            return "moderada"
+        return "baixa"
+
+    def fmt_aspects(asp_list: list) -> list:
+        return [f"{a['planet1']} {a['aspect']} {a['planet2']} (orb {a['orb']})" for a in asp_list[:5]]
 
     return {
         "saturno_desorientado": {
-            "detected": True,
-            "intensity": "alta",
-            "signature": f"Saturno em {saturn['sign']} casa {saturn['house']}",
+            "detected": len(saturn_hard_aspects) > 0 or saturn.get("retrograde", False),
+            "intensity": intensity(len(saturn_hard_aspects), saturn.get("retrograde", False)),
+            "signature": f"Saturno em {saturn.get('sign', '?')} casa {saturn.get('house', '?')}",
             "indicators": [
-                f"Saturno em {saturn['sign']} (signo de {saturn['element']}, modalidade {saturn['modality']}) — em queda no signo de Áries quebra o eixo de estrutura natural",
-                f"Casa {saturn['house']} (parcerias) — autoridade buscada via outros, não internalizada",
-                f"{len(saturn_hard_aspects)} aspectos tensos de Saturno detectados",
-                "Saturno retrógrado — autoridade interna fragmentada, voz crítica desalinhada do tempo real",
+                f"Saturno em {saturn.get('sign', '?')} (elemento {saturn.get('element', '?')}, modalidade {saturn.get('modality', '?')})",
+                f"Casa {saturn.get('house', '?')}",
+                f"Retrogrado: {'sim' if saturn.get('retrograde') else 'nao'}",
+                f"{len(saturn_hard_aspects)} aspecto(s) tenso(s) detectado(s)",
             ],
-            "shadow_pattern": "Cobrança difusa sem estrutura concreta. Sente-se 'atrasado' sem saber em quê. Procrastina e simultaneamente se pune por procrastinar.",
-            "embodied_question": "Onde estou tentando provar valor para uma autoridade que nem existe mais?",
-            "integration_path": "Construir um único compromisso pequeno e verificável por semana. Tornar Saturno tangível antes de espiritual.",
-            "related_aspects": [f"{a['planet1']} {a['aspect']} {a['planet2']} (orb {a['orb']}°)" for a in saturn_hard_aspects[:3]],
+            "related_aspects": fmt_aspects(saturn_hard_aspects),
         },
         "venus_negociada": {
-            "detected": True,
-            "intensity": "moderada-alta",
-            "signature": f"Vênus em {venus['sign']} casa {venus['house']}",
+            "detected": len(venus_hard_aspects) > 0 or venus.get("retrograde", False),
+            "intensity": intensity(len(venus_hard_aspects), venus.get("retrograde", False)),
+            "signature": f"Venus em {venus.get('sign', '?')} casa {venus.get('house', '?')}",
             "indicators": [
-                f"Vênus em {venus['sign']} — afetos intelectualizados, oscilação entre opções",
-                f"Casa {venus['house']} (filosofia/expansão) — ama o que parece elevado, dispersa o que é íntimo",
-                "Ascendente em Libra reforça padrão de agradar para evitar conflito",
-                "Aspectos de Vênus com Mercúrio/Saturno indicam afeto condicionado a desempenho",
+                f"Venus em {venus.get('sign', '?')} (elemento {venus.get('element', '?')}, modalidade {venus.get('modality', '?')})",
+                f"Casa {venus.get('house', '?')}",
+                f"Retrogrado: {'sim' if venus.get('retrograde') else 'nao'}",
+                f"{len(venus_hard_aspects)} aspecto(s) tenso(s) detectado(s)",
             ],
-            "shadow_pattern": "Negocia desejo em troca de aprovação. Diz 'tudo bem' antes de saber se está bem. Confunde admiração com intimidade.",
-            "embodied_question": "O que eu queria antes de aprender a perguntar o que o outro quer?",
-            "integration_path": "Praticar o 'não' sem justificativa por 30 dias. Notar onde o corpo trava ao desejar diretamente.",
-            "related_houses": [venus["house"], 1, 7],
+            "related_aspects": fmt_aspects(venus_hard_aspects),
         },
         "marte_apagado": {
-            "detected": True,
-            "intensity": "alta",
-            "signature": f"Marte em {mars['sign']} casa {mars['house']}",
+            "detected": len(mars_hard_aspects) > 0 or mars.get("retrograde", False),
+            "intensity": intensity(len(mars_hard_aspects), mars.get("retrograde", False)),
+            "signature": f"Marte em {mars.get('sign', '?')} casa {mars.get('house', '?')}",
             "indicators": [
-                f"Marte em {mars['sign']} — em queda, ação dissolvida em sensibilidade",
-                f"Casa {mars['house']} (rotina/saúde) — energia gasta em manutenção, não em iniciativa",
-                "Sem aspectos de fogo direto ao Marte — agressividade saudável bloqueada",
-                "Padrão: cansaço crônico precede qualquer impulso de mudança",
+                f"Marte em {mars.get('sign', '?')} (elemento {mars.get('element', '?')}, modalidade {mars.get('modality', '?')})",
+                f"Casa {mars.get('house', '?')}",
+                f"Retrogrado: {'sim' if mars.get('retrograde') else 'nao'}",
+                f"{len(mars_hard_aspects)} aspecto(s) tenso(s) detectado(s)",
             ],
-            "shadow_pattern": "Raiva vira culpa antes de chegar à boca. Esforço sem direção. Adoece quando precisa confrontar.",
-            "embodied_question": "Em qual situação eu aceitei calar para não parecer 'difícil'?",
-            "integration_path": "Movimento físico sem objetivo estético — 20 min/dia. Treinar dizer o desconforto enquanto ele ainda é pequeno.",
-            "somatic_markers": ["fadiga matinal", "tensão diafragmática", "sono não-reparador"],
+            "related_aspects": fmt_aspects(mars_hard_aspects),
         },
         "quiron_nao_integrado": {
-            "detected": True,
-            "intensity": "alta",
-            "signature": f"Quíron em {chiron['sign']} casa {chiron['house']}",
+            "detected": len(chiron_hard_aspects) > 0 or chiron.get("retrograde", False),
+            "intensity": intensity(len(chiron_hard_aspects), chiron.get("retrograde", False)),
+            "signature": f"Quiron em {chiron.get('sign', '?')} casa {chiron.get('house', '?')}",
             "indicators": [
-                f"Quíron em {chiron['sign']} — ferida de identidade, 'quem eu sou se não estou cuidando?'",
-                f"Casa {chiron['house']} (parcerias) — a ferida ativa nos vínculos íntimos",
-                "Quíron conjunto Saturno (orb < 7°) — ferida fundida com cobrança parental",
-                "Quíron retrógrado — processo de integração ainda em fase de reconhecimento",
+                f"Quiron em {chiron.get('sign', '?')} (elemento {chiron.get('element', '?')}, modalidade {chiron.get('modality', '?')})",
+                f"Casa {chiron.get('house', '?')}",
+                f"Retrogrado: {'sim' if chiron.get('retrograde') else 'nao'}",
+                f"{len(chiron_hard_aspects)} aspecto(s) tenso(s) detectado(s)",
             ],
-            "shadow_pattern": "Cura os outros para não sentir o próprio corte. Atrai pessoas que repetem o desencontro original. Vergonha de pedir.",
-            "embodied_question": "Que parte de mim eu trato como defeito quando é, na verdade, o lugar de onde eu enxergo melhor?",
-            "integration_path": "Escrever a ferida em primeira pessoa, sem moral. Voltar ao texto em 30 dias e notar o que mudou de tom.",
-            "core_wound_archetype": "O ferido que cura — mas que ainda não se deixou ser cuidado.",
+            "related_aspects": fmt_aspects(chiron_hard_aspects),
         },
         "central_anchor": {
             "anchor_planet": "pluto",
-            "anchor_position": f"Plutão em {pluto['sign']} casa {pluto['house']}",
-            "anchor_signature": f"{pluto['degree_formatted']} {pluto['sign']} — domicílio",
-            "anchor_archetype": "O Transformador Silencioso",
-            "core_theme": "Poder pessoal através de transformação radical de recursos internos",
-            "narrative": (
-                "A âncora desta carta é Plutão em Escorpião na casa 2 — domicílio exato. "
-                "Há um poder de regeneração profunda esperando ser ativado pelo reconhecimento "
-                "do próprio valor (casa 2). Enquanto Saturno (Áries casa 7) tenta construir "
-                "estrutura via aprovação alheia, Plutão sussurra que a estrutura real só vem "
-                "quando o sujeito assume que possui — recursos, desejos, sombra. "
-                "Os quatro pilares ANCORADA orbitam essa âncora: cada um deles é uma "
-                "forma de adiar o encontro com Plutão."
-            ),
-            "activation_keys": [
-                "Reconhecer onde já houve transformação concreta (não simbólica) na vida",
-                "Mapear recursos próprios — financeiros, somáticos, relacionais — sem comparação",
-                "Permitir que algo morra sem substituir imediatamente",
-                "Notar quando 'eu não consigo' é, na verdade, 'eu não quero mais'",
-            ],
+            "anchor_position": f"Plutao em {pluto.get('sign', '?')} casa {pluto.get('house', '?')}",
+            "anchor_signature": f"{pluto.get('degree_formatted', '?')} {pluto.get('sign', '?')}",
+            "total_pluto_aspects": len(pluto_aspects),
+            "related_aspects": fmt_aspects(pluto_aspects),
             "diagnostic_priority_order": [
-                "marte_apagado",
                 "saturno_desorientado",
+                "marte_apagado",
                 "quiron_nao_integrado",
                 "venus_negociada",
             ],
-            "integration_horizon": "12 a 18 meses de trabalho consistente com retorno saturnino próximo de Áries",
         },
     }
 
 
 # =============================================================================
-# Endpoint principal
+# Endpoints
 # =============================================================================
 @app.post("/calculate-chart")
 def calculate_chart(data: BirthData):
-    # Resolução de localização (mock — substituir por geocoder real)
+    # 1. Geocoding
+    geo = geocode_city(data.birth_city, data.birth_state, data.birth_country)
+    lat = geo["latitude"]
+    lon = geo["longitude"]
+
+    # 2. Timezone
+    date_parts = data.birth_date.split("-")
+    naive_dt = datetime(int(date_parts[0]), int(date_parts[1]), int(date_parts[2]))
+    tz_info = get_timezone_info(lat, lon, naive_dt)
+
     resolved_location = {
         "city": data.birth_city,
         "state": data.birth_state,
         "country": data.birth_country,
-        "latitude": -30.0346,
-        "longitude": -51.2177,
-        "timezone": "America/Sao_Paulo",
-        "utc_offset": "-03:00",
-        "resolved_at": datetime.utcnow().isoformat() + "Z",
-        "source": "mock_geocoder",
+        "latitude": round(lat, 6),
+        "longitude": round(lon, 6),
+        "timezone": tz_info["timezone"],
+        "utc_offset": tz_info["utc_offset"],
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "source": "nominatim_openstreetmap",
+        "display_name": geo["display_name"],
     }
 
-    natal_chart = build_natal_chart()
-    houses = build_houses(NATAL_LONGITUDES["ascendant"])
-    natal_aspects = build_natal_aspects()
-    current_transits = build_current_transits()
+    # 3. Julian Day
+    if data.birth_time_unknown and not data.birth_time:
+        birth_time = None
+    else:
+        birth_time = data.birth_time
+
+    jd = local_to_julian_day(data.birth_date, birth_time, tz_info["timezone"])
+
+    # 4. Planetas
+    planets = calculate_planets(jd)
+
+    # 5. Casas e angulos
+    houses_data = calculate_houses_and_angles(jd, lat, lon)
+
+    # 6. Montar retorno
+    natal_chart = build_natal_chart(planets, houses_data)
+    houses = build_houses(houses_data)
+    natal_aspects = build_natal_aspects(planets, houses_data)
+    current_transits = build_current_transits(planets, houses_data)
     ancorada_extraction = build_ancorada_extraction(natal_chart, natal_aspects)
 
     chart_json = {
         "mode": "real",
-        "is_mock": True,  # marcador honesto: dados são consistentes mas mockados
-        "calculated_at": datetime.utcnow().isoformat() + "Z",
+        "is_mock": False,
+        "engine": "pyswisseph (Swiss Ephemeris)",
+        "house_system": "Placidus",
+        "calculated_at": datetime.now(timezone.utc).isoformat(),
         "input_echo": {
             "birth_date": data.birth_date,
             "birth_time": data.birth_time,
             "birth_time_unknown": data.birth_time_unknown,
+            "birth_time_used": birth_time if birth_time else "12:00 (meio-dia solar)",
         },
         "natal_chart": natal_chart,
         "houses": houses,
@@ -449,11 +603,12 @@ def calculate_chart(data: BirthData):
 def root():
     return {
         "service": "ANCORADA Chart API",
-        "version": "0.2.0",
+        "version": "1.0.0",
+        "engine": "pyswisseph (Swiss Ephemeris)",
         "endpoints": ["POST /calculate-chart"],
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
