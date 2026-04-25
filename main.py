@@ -249,10 +249,19 @@ def calculate_planets(jd: float) -> dict:
     for name, pid in PLANET_IDS.items():
         # Chiron requer arquivo Swiss Eph; planetas principais usam Moshier
         if pid == swe.CHIRON:
-            flags = swe.FLG_SWIEPH | swe.FLG_SPEED
+            try:
+                flags = swe.FLG_SWIEPH | swe.FLG_SPEED
+                result, retflag = swe.calc_ut(jd, pid, flags)
+            except Exception:
+                # Fallback: tenta Moshier para Chiron
+                try:
+                    flags = swe.FLG_MOSEPH | swe.FLG_SPEED
+                    result, retflag = swe.calc_ut(jd, pid, flags)
+                except Exception:
+                    continue  # Pula Chiron se nao conseguir calcular
         else:
             flags = swe.FLG_MOSEPH | swe.FLG_SPEED
-        result, retflag = swe.calc_ut(jd, pid, flags)
+            result, retflag = swe.calc_ut(jd, pid, flags)
         lon, lat, dist, speed_lon, speed_lat, speed_dist = result
         results[name] = {
             "longitude": lon,
@@ -349,8 +358,8 @@ def build_natal_aspects(planets: dict, houses_data: dict) -> list:
         "sun", "moon", "mercury", "venus", "mars",
         "jupiter", "saturn", "uranus", "neptune", "pluto", "chiron",
     ]
-    # Inclui ASC e MC nos aspectos
-    longitudes = {name: planets[name]["longitude"] for name in aspect_planets}
+    # Inclui ASC e MC nos aspectos (filtra planetas ausentes)
+    longitudes = {name: planets[name]["longitude"] for name in aspect_planets if name in planets}
     longitudes["ascendant"] = houses_data["ascendant"]
     longitudes["midheaven"] = houses_data["midheaven"]
 
@@ -391,6 +400,8 @@ def build_current_transits(natal_planets: dict, natal_houses_data: dict) -> list
         sign_data = longitude_to_sign(tlon)
 
         for target in natal_targets:
+            if target not in natal_planets:
+                continue
             natal_lon = natal_planets[target]["longitude"]
             aspect = calc_aspect(tlon, natal_lon)
             if aspect and aspect["orb"] <= 3.0:
