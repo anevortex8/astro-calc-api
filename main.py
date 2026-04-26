@@ -609,7 +609,7 @@ def calculate_chart(data: BirthData):
 def root():
     return {
         "service": "ANCORADA Chart API",
-        "version": "1.1.0-chiron-fix",
+        "version": "1.2.0-chiron-fix",
         "engine": "pyswisseph (Swiss Ephemeris)",
         "endpoints": ["POST /calculate-chart"],
     }
@@ -618,3 +618,23 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/debug-chiron")
+def debug_chiron():
+    """Debug endpoint to diagnose Chiron calculation issues."""
+    info = {
+        "ephe_path": _EPHE_PATH,
+        "ephe_exists": _os.path.isdir(_EPHE_PATH),
+        "ephe_files": _os.listdir(_EPHE_PATH) if _os.path.isdir(_EPHE_PATH) else [],
+        "pyswisseph_version": getattr(swe, "__version__", "unknown"),
+        "chiron_id": swe.CHIRON,
+    }
+    jd = swe.julday(1990, 1, 15, 14.0)
+    for method_name, flag in [("SWIEPH", swe.FLG_SWIEPH), ("MOSEPH", swe.FLG_MOSEPH)]:
+        try:
+            result, retflag = swe.calc_ut(jd, swe.CHIRON, flag | swe.FLG_SPEED)
+            info[f"chiron_{method_name}"] = {"ok": True, "longitude": result[0]}
+        except Exception as e:
+            info[f"chiron_{method_name}"] = {"ok": False, "error": str(e)}
+    return info
