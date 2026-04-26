@@ -245,6 +245,7 @@ def local_to_julian_day(date_str: str, time_str: Optional[str], tz_name: str) ->
 
 def calculate_planets(jd: float) -> dict:
     """Calcula posicoes de todos os planetas para um Julian Day."""
+    swe.set_ephe_path(_EPHE_PATH)
     results = {}
     for name, pid in PLANET_IDS.items():
         try:
@@ -623,6 +624,7 @@ def health():
 @app.get("/debug-chiron")
 def debug_chiron():
     """Debug endpoint to diagnose Chiron calculation issues."""
+    swe.set_ephe_path(_EPHE_PATH)
     info = {
         "ephe_path": _EPHE_PATH,
         "ephe_exists": _os.path.isdir(_EPHE_PATH),
