@@ -247,21 +247,12 @@ def calculate_planets(jd: float) -> dict:
     """Calcula posicoes de todos os planetas para um Julian Day."""
     results = {}
     for name, pid in PLANET_IDS.items():
-        # Chiron requer arquivo Swiss Eph; planetas principais usam Moshier
-        if pid == swe.CHIRON:
-            try:
-                flags = swe.FLG_SWIEPH | swe.FLG_SPEED
-                result, retflag = swe.calc_ut(jd, pid, flags)
-            except Exception:
-                # Fallback: tenta Moshier para Chiron
-                try:
-                    flags = swe.FLG_MOSEPH | swe.FLG_SPEED
-                    result, retflag = swe.calc_ut(jd, pid, flags)
-                except Exception:
-                    continue  # Pula Chiron se nao conseguir calcular
-        else:
-            flags = swe.FLG_MOSEPH | swe.FLG_SPEED
+        flags = swe.FLG_MOSEPH | swe.FLG_SPEED
+        try:
             result, retflag = swe.calc_ut(jd, pid, flags)
+        except Exception as e:
+            print(f"[WARN] Falha ao calcular {name} (id={pid}): {e}")
+            continue
         lon, lat, dist, speed_lon, speed_lat, speed_dist = result
         results[name] = {
             "longitude": lon,
