@@ -605,7 +605,7 @@ def calculate_chart(data: BirthData):
 def root():
     return {
         "service": "ANCORADA Chart API",
-        "version": "1.0.0",
+        "version": "1.1.0-chiron-fix",
         "engine": "pyswisseph (Swiss Ephemeris)",
         "endpoints": ["POST /calculate-chart"],
     }
