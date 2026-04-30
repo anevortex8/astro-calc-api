@@ -374,35 +374,65 @@ def build_natal_aspects(planets: dict, houses_data: dict) -> list:
 
 
 def build_current_transits(natal_planets: dict, natal_houses_data: dict) -> list:
-    """Calcula transitos atuais reais sobre planetas natais."""
+    """Calcula transitos atuais reais sobre planetas natais.
+
+    Orbes máximos por planeta transitante:
+    - Plutão, Netuno, Urano, Saturno: 5°
+    - Quíron: 4°
+    - Júpiter: 3°
+    - Marte: 2° (descartado por ser rápido demais para diagnóstico ANCORADA)
+
+    Alvos natais: todos os planetas + ASC + MC.
+    """
     now_utc = datetime.now(timezone.utc)
     decimal_hour = now_utc.hour + now_utc.minute / 60.0 + now_utc.second / 3600.0
     jd_now = swe.julday(now_utc.year, now_utc.month, now_utc.day, decimal_hour)
 
-    transit_planets_ids = {
-        "jupiter": swe.JUPITER,
-        "saturn": swe.SATURN,
-        "uranus": swe.URANUS,
-        "neptune": swe.NEPTUNE,
-        "pluto": swe.PLUTO,
+    # Planetas transitantes com seus orbes máximos
+    transit_planets = {
+        "jupiter":  (swe.JUPITER, 3.0),
+        "saturn":   (swe.SATURN, 5.0),
+        "uranus":   (swe.URANUS, 5.0),
+        "neptune":  (swe.NEPTUNE, 5.0),
+        "pluto":    (swe.PLUTO, 5.0),
     }
-    natal_targets = ["sun", "moon", "venus", "mars", "saturn", "chiron"]
+
+    # Quíron transitante (ID especial no swisseph)
+    try:
+        chiron_tid = swe.CHIRON
+        transit_planets["chiron_tr"] = (chiron_tid, 4.0)
+    except AttributeError:
+        pass  # swisseph sem suporte a Quíron
+
+    # Alvos natais expandidos: todos os planetas + ASC + MC
+    natal_targets = [
+        "sun", "moon", "mercury", "venus", "mars", "jupiter",
+        "saturn", "uranus", "neptune", "pluto", "chiron",
+        "ascendant", "midheaven",
+    ]
 
     transits = []
-    for tname, tid in transit_planets_ids.items():
+    for tname, (tid, max_orb) in transit_planets.items():
         flags = swe.FLG_MOSEPH | swe.FLG_SPEED
-        result, _ = swe.calc_ut(jd_now, tid, flags)
+        try:
+            result, _ = swe.calc_ut(jd_now, tid, flags)
+        except Exception:
+            continue
         tlon = result[0]
         sign_data = longitude_to_sign(tlon)
 
         for target in natal_targets:
             if target not in natal_planets:
                 continue
+            # Evitar trânsito de planeta sobre si mesmo (ex: Júpiter tr. sobre Júpiter natal)
+            # Permitir pois retornos planetários são significativos (ex: retorno de Saturno)
             natal_lon = natal_planets[target]["longitude"]
             aspect = calc_aspect(tlon, natal_lon)
-            if aspect and aspect["orb"] <= 3.0:
+            if aspect and aspect["orb"] <= max_orb:
+                # Nomear chiron transitante sem conflito com chiron natal
+                display_name = "chiron" if tname == "chiron_tr" else tname
                 transits.append({
-                    "transit_planet": tname,
+                    "transit_planet": display_name,
                     "transit_position": {
                         "sign": sign_data["sign"],
                         "degree_formatted": sign_data["degree_formatted"],
@@ -414,6 +444,9 @@ def build_current_transits(natal_planets: dict, natal_houses_data: dict) -> list
                     "applying": aspect["applying"],
                     "strength": aspect["strength"],
                 })
+
+    # Ordenar por força: menor orbe primeiro
+    transits.sort(key=lambda t: t["orb"])
     return transits
 
 
