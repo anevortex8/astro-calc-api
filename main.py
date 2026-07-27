@@ -712,13 +712,20 @@ def motor(nome, ano, mes, dia, hora_ut, lat, lon):
     )
 
     # eclipses no mapa
-    ecl_solar = dict(grau="20°02' Leão", sabiano="Leão 20 · índios Zuni realizam um ritual ao Sol",
+    # "data" é o único campo que registra o dia real do evento (12/08 e 28/08 de 2026) no
+    # JSON serializado — antes só existia como comentário Python ao lado de ECLIPSE_SOLAR/
+    # ECLIPSE_LUNAR (nunca chegava no eclipse_season_json), o que deixava o Claude do
+    # norte-vivo-produtos-api sem a data real e o levava a alucinar ano/dia errado na prosa
+    # gerada (achado da revisão da Aferidor, fatia PDF do Mapa dos Eclipses).
+    ecl_solar = dict(grau="20°02' Leão", data="12/08/2026",
+        sabiano="Leão 20 · índios Zuni realizam um ritual ao Sol",
         casa=house_of(ECLIPSE_SOLAR, cusps), na_porta_da_casa=None,
         aspectos=aspectos_para(ECLIPSE_SOLAR, pts),
         conj_ampla=[dict(ponto=n, posicao=fmt(L), orbe=round(diff(ECLIPSE_SOLAR, L), 2))
                     for n, (L, _) in pts.items() if 3.0 < diff(ECLIPSE_SOLAR, L) <= 4.5
                     and int(L // 30) == 4])
-    ecl_lunar = dict(grau="4°54' Peixes", sabiano="Peixes 4 · tráfego intenso num istmo estreito que liga dois balneários",
+    ecl_lunar = dict(grau="4°54' Peixes", data="28/08/2026",
+        sabiano="Peixes 4 · tráfego intenso num istmo estreito que liga dois balneários",
         casa=house_of(ECLIPSE_LUNAR, cusps), aspectos=aspectos_para(ECLIPSE_LUNAR, pts))
 
     # eclipse de 2022 (assinatura do buraco negro): 2°00' Escorpião
