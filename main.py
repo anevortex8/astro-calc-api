@@ -8,6 +8,7 @@ Para rodar:
     uvicorn main:app --reload --port 8000
 """
 
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -55,6 +56,11 @@ class BirthData(BaseModel):
     birth_state: Optional[str] = None
     birth_country: str
     birth_time_unknown: bool = False
+
+
+class EclipseSeasonRequest(BirthData):
+    """Mesmos campos de BirthData — endpoint autocontido, resolve geocoding/timezone/JD internamente."""
+    pass
 
 
 # =============================================================================
@@ -566,6 +572,263 @@ def build_ancorada_extraction(natal_chart: dict, aspects: list) -> dict:
 
 
 # =============================================================================
+# Eclipse Season - motor (porte 1:1 de calcula_mapa.py, norte-vivo-produtos)
+# =============================================================================
+FLG = swe.FLG_SWIEPH | swe.FLG_SPEED
+
+SIGNOS = ["Áries", "Touro", "Gêmeos", "Câncer", "Leão", "Virgem", "Libra", "Escorpião",
+          "Sagitário", "Capricórnio", "Aquário", "Peixes"]
+PLANETAS = {'Sol': swe.SUN, 'Lua': swe.MOON, 'Mercúrio': swe.MERCURY, 'Vênus': swe.VENUS,
+ 'Marte': swe.MARS, 'Júpiter': swe.JUPITER, 'Saturno': swe.SATURN, 'Urano': swe.URANUS,
+ 'Netuno': swe.NEPTUNE, 'Plutão': swe.PLUTO, 'Nodo Norte': swe.MEAN_NODE, 'Quíron': swe.CHIRON,
+ 'Lilith': swe.MEAN_APOG}
+# regências do Método Bússola (tradicionais + Quíron rege Virgem)
+REGENTES = {"Áries": ["Marte"], "Touro": ["Vênus"], "Gêmeos": ["Mercúrio"],
+ "Câncer": ["Lua"], "Leão": ["Sol"], "Virgem": ["Mercúrio", "Quíron"],
+ "Libra": ["Vênus"], "Escorpião": ["Plutão", "Marte"], "Sagitário": ["Júpiter"],
+ "Capricórnio": ["Saturno"], "Aquário": ["Urano", "Saturno"], "Peixes": ["Netuno", "Júpiter"]}
+DOMICILIO = {"Marte": ["Áries", "Escorpião"], "Vênus": ["Touro", "Libra"],
+ "Mercúrio": ["Gêmeos", "Virgem"], "Lua": ["Câncer"], "Sol": ["Leão"],
+ "Júpiter": ["Sagitário", "Peixes"], "Saturno": ["Capricórnio", "Aquário"]}
+EXALTACAO = {"Sol": "Áries", "Lua": "Touro", "Mercúrio": "Virgem", "Vênus": "Peixes",
+ "Marte": "Capricórnio", "Júpiter": "Câncer", "Saturno": "Libra"}
+
+ECLIPSE_SOLAR = 120 + 20 + 2 / 60      # 20°02' Leão · 12/08/2026
+ECLIPSE_LUNAR = 330 + 4 + 54 / 60      # 4°54' Peixes · 28/08/2026
+SAROS_126 = [("22/07/1990", 1990.55), ("01/08/2008", 2008.58),
+             ("12/08/2026", 2026.61), ("23/08/2044", 2044.64)]
+ASPECTOS = [("conjunção", 0), ("sextil", 60), ("quadratura", 90), ("trígono", 120), ("oposição", 180)]
+
+
+def fmt(lon):
+    s = int(lon // 30); g = lon % 30; m = int(round((g - int(g)) * 60))
+    d = int(g)
+    if m == 60: d += 1; m = 0
+    return f"{d}°{m:02d}' {SIGNOS[s]}"
+
+
+def grau_sabiano(lon):
+    """Convenção do método: truncamento. 22°47' Virgem = Virgem 22."""
+    return f"{SIGNOS[int(lon // 30)]} {int(lon % 30)}"
+
+
+def calc(jd, p): return swe.calc_ut(jd, p, FLG)[0]
+
+
+def house_of(lon_pt, cusps):
+    for i in range(12):
+        a = cusps[i]; b = cusps[(i + 1) % 12]
+        if a <= b:
+            if a <= lon_pt < b: return i + 1
+        else:
+            if lon_pt >= a or lon_pt < b: return i + 1
+
+
+def diff(a, b): return abs(((a - b) + 180) % 360 - 180)
+
+
+def aspectos_para(edeg, pts, orbe=3.0):
+    out = []
+    for n, (L, retro) in pts.items():
+        d = diff(edeg, L)
+        for nome, ang in ASPECTOS:
+            o = abs(d - ang)
+            if o <= orbe:
+                out.append(dict(aspecto=nome, ponto=n, posicao=fmt(L),
+                                orbe=f"{int(o)}°{int(round((o - int(o)) * 60)):02d}'", orbe_dec=round(o, 2)))
+    return sorted(out, key=lambda x: x["orbe_dec"])
+
+
+def cruzamentos(planeta, target, jd0, jd1, passo=1.0):
+    hits = []; prev = None; jd = jd0
+    while jd < jd1:
+        d = ((calc(jd, planeta)[0] - target) + 180) % 360 - 180
+        if prev is not None and prev * d <= 0 and abs(d) < 6:
+            lo, hi = jd - passo, jd
+            for _ in range(40):
+                mid = (lo + hi) / 2
+                dm = ((calc(mid, planeta)[0] - target) + 180) % 360 - 180
+                dl = ((calc(lo, planeta)[0] - target) + 180) % 360 - 180
+                if dl * dm <= 0: hi = mid
+                else: lo = mid
+            y, m, dd, h = swe.revjul((lo + hi) / 2); hits.append(f"{int(dd):02d}/{int(m):02d}/{y}")
+        prev = d; jd += passo
+    return hits
+
+
+def motor(nome, ano, mes, dia, hora_ut, lat, lon):
+    jd = swe.julday(ano, mes, dia, hora_ut)
+    pts = {}
+    for n, p in PLANETAS.items():
+        r = calc(jd, p); pts[n] = (r[0], r[3] < 0)
+    ns = ((pts['Nodo Norte'][0] + 180) % 360, pts['Nodo Norte'][1])
+    pts['Nodo Sul'] = ns
+    cusps, ascmc = swe.houses(jd, lat, lon, b'P')
+    pts['Ascendente'] = (ascmc[0], False); pts['Meio do Céu'] = (ascmc[1], False)
+    fundo = (ascmc[1] + 180) % 360
+
+    def porta(L):
+        for i in range(12):
+            d = ((cusps[i] - L) % 360)
+            if 0 < d <= 2.0: return i + 1
+        return None
+    natal = {n: dict(posicao=fmt(L), casa=house_of(L, cusps), retro=bool(r),
+                  sabiano=grau_sabiano(L),
+                  na_porta_da_casa=porta(L)) for n, (L, r) in pts.items()}
+    natal['Fundo do Céu'] = dict(posicao=fmt(fundo), casa=4, retro=False, sabiano=grau_sabiano(fundo))
+
+    # dignidades dos pontos-chave
+    dign = {}
+    for n, (L, _) in pts.items():
+        if n in DOMICILIO or n in EXALTACAO:
+            sg = SIGNOS[int(L // 30)]; d = []
+            if sg in DOMICILIO.get(n, []): d.append("domicílio")
+            if EXALTACAO.get(n) == sg: d.append("exaltação")
+            if d: dign[n] = d
+    # recepções mútuas (planetas pessoais)
+    recep = []
+    pess = ['Sol', 'Lua', 'Mercúrio', 'Vênus', 'Marte', 'Júpiter', 'Saturno']
+    for i, p1 in enumerate(pess):
+        for p2 in pess[i + 1:]:
+            s1 = SIGNOS[int(pts[p1][0] // 30)]; s2 = SIGNOS[int(pts[p2][0] // 30)]
+            if p2 in REGENTES.get(s1, []) and p1 in REGENTES.get(s2, []):
+                recep.append(f"{p1} em {s1} / {p2} em {s2}")
+
+    # cadeias de regência do método
+    def cadeia_de(rotulo, lon_ponto):
+        sg = SIGNOS[int(lon_ponto // 30)]
+        return dict(ponto=rotulo, signo=sg,
+            regentes=[dict(nome=r, posicao=natal[r]['posicao'], casa=natal[r]['casa'],
+                           sabiano=natal[r]['sabiano'],
+                           dignidade=dign.get(r, []), retro=natal[r]['retro'])
+                      for r in REGENTES[sg] if r in natal])
+    cadeias = dict(
+        casa1=cadeia_de("Casa 1 (Ascendente)", ascmc[0]),
+        casa7=cadeia_de("Casa 7", cusps[6]),
+        nodo_sul=cadeia_de("Nodo Sul", ns[0]),
+        nodo_norte=cadeia_de("Nodo Norte", pts['Nodo Norte'][0]),
+        lua=cadeia_de("Lua", pts['Lua'][0]),
+        casa_eclipse_solar=cadeia_de("Casa do eclipse solar", cusps[house_of(ECLIPSE_SOLAR, cusps) - 1]),
+    )
+
+    # eclipses no mapa
+    ecl_solar = dict(grau="20°02' Leão", sabiano="Leão 20 · índios Zuni realizam um ritual ao Sol",
+        casa=house_of(ECLIPSE_SOLAR, cusps), na_porta_da_casa=None,
+        aspectos=aspectos_para(ECLIPSE_SOLAR, pts),
+        conj_ampla=[dict(ponto=n, posicao=fmt(L), orbe=round(diff(ECLIPSE_SOLAR, L), 2))
+                    for n, (L, _) in pts.items() if 3.0 < diff(ECLIPSE_SOLAR, L) <= 4.5
+                    and int(L // 30) == 4])
+    ecl_lunar = dict(grau="4°54' Peixes", sabiano="Peixes 4 · tráfego intenso num istmo estreito que liga dois balneários",
+        casa=house_of(ECLIPSE_LUNAR, cusps), aspectos=aspectos_para(ECLIPSE_LUNAR, pts))
+
+    # eclipse de 2022 (assinatura do buraco negro): 2°00' Escorpião
+    e22 = 210 + 2.0
+    ecl_2022 = dict(grau="2°00' Escorpião", casa=house_of(e22, cusps),
+                  aspectos=aspectos_para(e22, pts, orbe=3.0))
+
+    # calendário de Júpiter sobre o Sol natal e sobre o Nodo Sul natal (se em signos alcançáveis 2026-27: Leão/Virgem)
+    jd0 = swe.julday(2026, 8, 1); jd1 = swe.julday(2027, 12, 31)
+    jup = dict()
+    jup['sobre_o_Sol'] = cruzamentos(swe.JUPITER, pts['Sol'][0], jd0, jd1)
+    jup['sobre_o_Nodo_Sul'] = cruzamentos(swe.JUPITER, ns[0], jd0, jd1)
+    jup['estacoes'] = "Rx 13/12/2026 a 27° Leão · direta 13/04/2027 a 17°00' Leão"
+
+    # retorno de Vênus na janela (jul-out 2026)
+    vret = cruzamentos(swe.VENUS, pts['Vênus'][0], swe.julday(2026, 7, 1), swe.julday(2026, 10, 31), passo=0.25)
+
+    # trânsitos de contexto no dia do eclipse (lentos + Saturno/Quíron/Marte) a natal, orbe 2.5
+    jde = swe.julday(2026, 8, 12, 17.77)
+    ctx = []
+    for tn, tp in [('Plutão', swe.PLUTO), ('Netuno', swe.NEPTUNE), ('Urano', swe.URANUS),
+                  ('Saturno', swe.SATURN), ('Quíron', swe.CHIRON), ('Júpiter', swe.JUPITER), ('Marte', swe.MARS)]:
+        L = calc(jde, tp)[0]
+        for n, (Ln, _) in pts.items():
+            d = diff(L, Ln)
+            for nome_asp, ang in ASPECTOS:
+                o = abs(d - ang)
+                if o <= 2.5:
+                    ctx.append(dict(transito=f"{tn} a {fmt(L)}", aspecto=nome_asp, natal=f"{n} {fmt(Ln)}",
+                                    casa_transitada=house_of(L, cusps), orbe=round(o, 2)))
+    ctx = sorted(ctx, key=lambda x: x['orbe'])
+
+    # idades de Saros
+    ano_dec = ano + (mes - 1) / 12 + dia / 365
+    saros = [dict(data=d, idade=round(y - ano_dec, 1)) for d, y in SAROS_126]
+
+    return dict(nome=nome,
+        nascimento=f"{dia:02d}/{mes:02d}/{ano} {int(hora_ut):02d}:{int((hora_ut % 1) * 60):02d} UT · lat {lat} lon {lon}",
+        natal=natal, cuspides=[fmt(c) for c in cusps],
+        dignidades=dign, recepcoes_mutuas=recep, cadeias=cadeias,
+        eclipse_solar=ecl_solar, eclipse_lunar=ecl_lunar, eclipse_2022=ecl_2022,
+        jupiter=jup, retorno_de_venus=vret, contexto_transitos=ctx[:14], saros=saros)
+
+
+# --- pós-processamento determinístico (achados não computados por motor() hoje) ---
+_POSICAO_RE = re.compile(r"(\d+)°(\d+)'\s*(.+)")
+_ANGULOS_EXCLUIDOS_REDE_DE_GRAU = {"Ascendente", "Meio do Céu", "Fundo do Céu"}
+_JUPITER_ESTACOES_FIXAS = [
+    {"estacao": "27°00' Leão retrógrada", "longitude": 4 * 30 + 27},
+    {"estacao": "17°00' Leão direta", "longitude": 4 * 30 + 17},
+]
+_PONTOS_ACHADO_DE_CAPA = ["Sol", "Ascendente", "Meio do Céu", "Nodo Norte", "Nodo Sul"]
+
+
+def _posicao_para_grau_signo(posicao: str):
+    """Reconstroi (grau_truncado, grau_decimal, longitude_absoluta) a partir da string formatada por fmt()."""
+    m = _POSICAO_RE.match(posicao.strip())
+    deg, minutos, signo = int(m.group(1)), int(m.group(2)), m.group(3).strip()
+    grau_decimal = deg + minutos / 60.0
+    longitude_absoluta = SIGNOS.index(signo) * 30 + grau_decimal
+    return deg, grau_decimal, longitude_absoluta
+
+
+def _calcular_rede_de_grau(natal: dict) -> list:
+    """Regra de ouro (arquitetura-mapa.md, seção 5): 3+ pontos no mesmo grau, tolerância 1°.
+
+    "Tolerância 1°" é lida como diâmetro do grupo, não cadeia transitiva: todos os membros
+    precisam estar mutuamente a até 1° de distância entre si (grau truncado). Uma janela de
+    3 graus truncados consecutivos (ex.: 8, 9, 10) tem diâmetro 2 e NÃO forma uma rede — só
+    duas casas de grau adjacentes (ex.: 22 e 23) podem se combinar num único grupo.
+    """
+    nomes = [n for n in natal if n not in _ANGULOS_EXCLUIDOS_REDE_DE_GRAU]
+    graus = {n: _posicao_para_grau_signo(natal[n]["posicao"])[:2] for n in nomes}
+
+    candidatos = []
+    for g in range(30):
+        janela = {g, (g + 1) % 30}
+        membros = frozenset(n for n in nomes if graus[n][0] in janela)
+        if len(membros) >= 3:
+            candidatos.append(membros)
+
+    # mantém só grupos maximais (descarta quem é subconjunto de outro candidato)
+    maximais = [c for c in candidatos if not any(c < outro for outro in candidatos)]
+    grupos_unicos = {frozenset(m) for m in maximais}
+
+    rede = []
+    for membros in grupos_unicos:
+        membros_ordenados = sorted(membros, key=lambda n: graus[n][1])
+        valores = [graus[n][0] for n in membros_ordenados]
+        moda = max(set(valores), key=lambda v: (valores.count(v), -v))
+        rede.append({"grau": str(moda), "pontos": membros_ordenados})
+    rede.sort(key=lambda g: g["grau"])
+    return rede
+
+
+def _calcular_achados_de_capa(natal: dict) -> list:
+    """Regra do achado de capa (arquitetura-mapa.md): estação a menos de 1° de Sol/Ascendente/Meio do Céu/Nodos natais."""
+    achados = []
+    for estacao in _JUPITER_ESTACOES_FIXAS:
+        for ponto in _PONTOS_ACHADO_DE_CAPA:
+            if ponto not in natal:
+                continue
+            _, _, lon_natal = _posicao_para_grau_signo(natal[ponto]["posicao"])
+            orbe = diff(estacao["longitude"], lon_natal)
+            if orbe < 1.0:
+                achados.append({"estacao": estacao["estacao"], "ponto_natal": ponto, "orbe": round(orbe, 2)})
+    return achados
+
+
+# =============================================================================
 # Endpoints
 # =============================================================================
 @app.post("/calculate-chart")
@@ -639,13 +902,60 @@ def calculate_chart(data: BirthData):
     }
 
 
+@app.post("/calculate-eclipse-season")
+def calculate_eclipse_season(data: EclipseSeasonRequest):
+    # 1. Geocoding
+    geo = geocode_city(data.birth_city, data.birth_state, data.birth_country)
+    lat = geo["latitude"]
+    lon = geo["longitude"]
+
+    # 2. Timezone
+    date_parts = data.birth_date.split("-")
+    naive_dt = datetime(int(date_parts[0]), int(date_parts[1]), int(date_parts[2]))
+    tz_info = get_timezone_info(lat, lon, naive_dt)
+
+    resolved_location = {
+        "city": data.birth_city,
+        "state": data.birth_state,
+        "country": data.birth_country,
+        "latitude": round(lat, 6),
+        "longitude": round(lon, 6),
+        "timezone": tz_info["timezone"],
+        "utc_offset": tz_info["utc_offset"],
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "source": "nominatim_openstreetmap",
+        "display_name": geo["display_name"],
+    }
+
+    # 3. Julian Day
+    if data.birth_time_unknown and not data.birth_time:
+        birth_time = None
+    else:
+        birth_time = data.birth_time
+
+    jd = local_to_julian_day(data.birth_date, birth_time, tz_info["timezone"])
+    ano, mes, dia, hora_ut = swe.revjul(jd)
+
+    # 4. Motor do Mapa dos Eclipses (porte de calcula_mapa.py)
+    eclipse_season_json = motor("", ano, mes, int(dia), hora_ut, lat, lon)
+
+    # 5. Pós-processamento determinístico (achados que motor() não computa hoje)
+    eclipse_season_json["rede_de_grau"] = _calcular_rede_de_grau(eclipse_season_json["natal"])
+    eclipse_season_json["jupiter"]["achados_de_capa"] = _calcular_achados_de_capa(eclipse_season_json["natal"])
+
+    return {
+        "resolved_location": resolved_location,
+        "eclipse_season_json": eclipse_season_json,
+    }
+
+
 @app.get("/")
 def root():
     return {
         "service": "ANCORADA Chart API",
-        "version": "1.2.0-chiron-fix",
+        "version": "1.3.0-eclipse-season",
         "engine": "pyswisseph (Swiss Ephemeris)",
-        "endpoints": ["POST /calculate-chart"],
+        "endpoints": ["POST /calculate-chart", "POST /calculate-eclipse-season"],
     }
 
 
