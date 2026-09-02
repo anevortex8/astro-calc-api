@@ -9,12 +9,14 @@ Para rodar:
 """
 
 import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
 import swisseph as swe
 import pytz
 from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderServiceError
 from timezonefinder import TimezoneFinder
 
 from fastapi import FastAPI, HTTPException
@@ -191,17 +193,43 @@ def determine_house(longitude: float, cusps: list[float]) -> int:
     return 1
 
 
+_GEOCODE_TIMEOUT_S = 10
+_GEOCODE_MAX_ATTEMPTS = 3
+_GEOCODE_RETRY_DELAY_S = 2
+
+
 def geocode_city(city: str, state: Optional[str], country: str) -> dict:
     """Geocodifica cidade usando Nominatim (OpenStreetMap)."""
-    geolocator = Nominatim(user_agent="ancorada-chart-api/1.0")
+    geolocator = Nominatim(user_agent="ancorada-chart-api/1.0", timeout=_GEOCODE_TIMEOUT_S)
     parts = [city]
     if state:
         parts.append(state)
     parts.append(country)
     query = ", ".join(parts)
 
-    location = geolocator.geocode(query, language="pt")
-    if not location:
+    # Nominatim e um servico publico compartilhado sujeito a timeout/indisponibilidade
+    # transitoria. Sem retry, qualquer soluco de rede virava excecao nao tratada e o
+    # FastAPI respondia 500 generico pro caller (process-generation-queue).
+    location = None
+    last_error: Optional[GeocoderServiceError] = None
+    for attempt in range(_GEOCODE_MAX_ATTEMPTS):
+        try:
+            location = geolocator.geocode(query, language="pt")
+            break
+        except GeocoderServiceError as e:
+            last_error = e
+            if attempt < _GEOCODE_MAX_ATTEMPTS - 1:
+                time.sleep(_GEOCODE_RETRY_DELAY_S)
+
+    if location is None:
+        if last_error is not None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Servico de geocodificacao (Nominatim) indisponivel apos "
+                    f"{_GEOCODE_MAX_ATTEMPTS} tentativas: {last_error}"
+                ),
+            )
         raise HTTPException(
             status_code=404,
             detail=f"Nao foi possivel geocodificar a cidade: {query}",
